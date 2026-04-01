@@ -23,6 +23,8 @@ from .alpha_vantage import (
     get_global_news as get_alpha_vantage_global_news,
 )
 from .alpha_vantage_common import AlphaVantageRateLimitError
+from .mds_dataflows import get_MDS_data, get_MDS_indicators
+from .mds_client import MDSUnavailableError
 
 # Configuration and routing logic
 from .config import get_config
@@ -61,6 +63,7 @@ TOOLS_CATEGORIES = {
 }
 
 VENDOR_LIST = [
+    "mds",
     "yfinance",
     "alpha_vantage",
 ]
@@ -69,11 +72,13 @@ VENDOR_LIST = [
 VENDOR_METHODS = {
     # core_stock_apis
     "get_stock_data": {
+        "mds": get_MDS_data,
         "alpha_vantage": get_alpha_vantage_stock,
         "yfinance": get_YFin_data_online,
     },
     # technical_indicators
     "get_indicators": {
+        "mds": get_MDS_indicators,
         "alpha_vantage": get_alpha_vantage_indicator,
         "yfinance": get_stock_stats_indicators_window,
     },
@@ -156,7 +161,7 @@ def route_to_vendor(method: str, *args, **kwargs):
 
         try:
             return impl_func(*args, **kwargs)
-        except AlphaVantageRateLimitError:
-            continue  # Only rate limits trigger fallback
+        except (AlphaVantageRateLimitError, MDSUnavailableError):
+            continue  # Rate limits and MDS unavailability trigger fallback
 
     raise RuntimeError(f"No available vendor for '{method}'")

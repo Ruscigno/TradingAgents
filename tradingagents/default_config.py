@@ -35,13 +35,15 @@ DEFAULT_CONFIG = {
     "max_debate_rounds": 1,
     "max_risk_discuss_rounds": 1,
     "max_recur_limit": 100,
+    # Market Data Service (MDS) configuration
+    "mds_base_url": "http://localhost:8080",
     # Data vendor configuration
     # Category-level configuration (default for all tools in category)
     "data_vendors": {
-        "core_stock_apis": "yfinance",       # Options: alpha_vantage, yfinance
-        "technical_indicators": "yfinance",  # Options: alpha_vantage, yfinance
-        "fundamental_data": "yfinance",      # Options: alpha_vantage, yfinance
-        "news_data": "yfinance",             # Options: alpha_vantage, yfinance
+        "core_stock_apis": "mds",            # Options: mds, alpha_vantage, yfinance
+        "technical_indicators": "mds",       # Options: mds, alpha_vantage, yfinance
+        "fundamental_data": "yfinance",      # Options: alpha_vantage, yfinance (MDS has no fundamentals)
+        "news_data": "yfinance",             # Options: alpha_vantage, yfinance (MDS has no news)
     },
     # Tool-level configuration (takes precedence over category-level)
     "tool_vendors": {
