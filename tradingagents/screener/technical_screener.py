@@ -11,12 +11,20 @@ Default thresholds target stocks in a bullish momentum zone:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import json
+import logging
+from dataclasses import dataclass
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 import pandas as pd
 
 from ..dataflows.mds_client import MDSClient, MDSUnavailableError
+
+if TYPE_CHECKING:
+    from .config_loader import ScreenerConfigLoader
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -47,17 +55,22 @@ class TechnicalScreener:
     """Filters tickers using RSI, Volume Oscillator, and Distance from SMA50.
 
     Args:
-        mds_client: MDSClient instance to fetch OHLCV data from.
-        config:     Threshold configuration. Defaults to momentum/breakout zone.
+        mds_client:    MDSClient instance to fetch OHLCV data from.
+        config:        Default threshold configuration (momentum/breakout zone).
+        config_loader: Optional per-ticker config loader. When set,
+                       ``screen()`` resolves a ScreenerConfig for each ticker
+                       via the loader (merging YAML overrides onto ``config``).
     """
 
     def __init__(
         self,
         mds_client: MDSClient,
         config: ScreenerConfig = ScreenerConfig(),
+        config_loader: ScreenerConfigLoader | None = None,
     ) -> None:
         self._client = mds_client
         self._config = config
+        self._config_loader = config_loader
 
     def screen(self, tickers: list[str], as_of_date: str) -> list[ScreenerResult]:
         """Screen a list of tickers and return all results (pass and fail).
@@ -80,10 +93,28 @@ class TechnicalScreener:
         start_str = fetch_start.strftime("%Y-%m-%d")
         end_str = fetch_end.strftime("%Y-%m-%d")
 
+        logger.debug(json.dumps({
+            "stage": "screening_start",
+            "tickers": len(tickers),
+            "as_of_date": as_of_date,
+            "fetch_start": start_str,
+            "fetch_end": end_str,
+        }))
+
         results: list[ScreenerResult] = []
         for ticker in tickers:
-            result = self._screen_one(ticker, start_str, end_str, as_of_date)
+            cfg = self._config_loader.get_config(ticker) if self._config_loader else self._config
+            result = self._screen_one(ticker, start_str, end_str, as_of_date, cfg)
             results.append(result)
+
+        passed = sum(1 for r in results if r.passed)
+        logger.debug(json.dumps({
+            "stage": "screening_done",
+            "total": len(tickers),
+            "passed": passed,
+            "failed": len(tickers) - passed,
+        }))
+
         return results
 
     def passing(self, tickers: list[str], as_of_date: str) -> list[str]:
@@ -98,66 +129,103 @@ class TechnicalScreener:
         fetch_start: str,
         fetch_end: str,
         as_of_date: str,
+        cfg: ScreenerConfig,
     ) -> ScreenerResult:
+        logger.debug(json.dumps({
+            "ticker": ticker,
+            "stage": "fetch",
+            "start": fetch_start,
+            "end": fetch_end,
+            "rsi_threshold": [cfg.rsi_min, cfg.rsi_max],
+            "vol_osc_min": cfg.vol_osc_min,
+            "dist_ma_range": [cfg.dist_ma_min, cfg.dist_ma_max],
+        }))
+
         try:
             df = self._client.get_ohlcv(ticker, fetch_start, fetch_end, resolution="1d")
         except MDSUnavailableError as exc:
-            return ScreenerResult(
-                ticker=ticker,
-                passed=False,
-                rsi=None,
-                vol_osc=None,
-                dist_ma_pct=None,
-                reason=f"MDS unavailable: {exc}",
+            result = ScreenerResult(
+                ticker=ticker, passed=False, rsi=None, vol_osc=None,
+                dist_ma_pct=None, reason=f"MDS unavailable: {exc}",
             )
+            _log_result(result)
+            return result
 
         if df.empty:
-            return ScreenerResult(
-                ticker=ticker,
-                passed=False,
-                rsi=None,
-                vol_osc=None,
-                dist_ma_pct=None,
-                reason="No data",
+            result = ScreenerResult(
+                ticker=ticker, passed=False, rsi=None, vol_osc=None,
+                dist_ma_pct=None, reason="No data",
             )
+            _log_result(result)
+            return result
 
         # Trim to as_of_date (inclusive) — drop tz for comparison simplicity
         if df.index.tz is not None:
             df.index = df.index.tz_localize(None)
         df = df[df.index <= as_of_date]
 
-        if len(df) < self._config.ma_period:
-            return ScreenerResult(
-                ticker=ticker,
-                passed=False,
-                rsi=None,
-                vol_osc=None,
+        logger.debug(json.dumps({"ticker": ticker, "stage": "data_trimmed", "bars": len(df)}))
+
+        if len(df) < cfg.ma_period:
+            result = ScreenerResult(
+                ticker=ticker, passed=False, rsi=None, vol_osc=None,
                 dist_ma_pct=None,
-                reason=f"Insufficient data ({len(df)} bars, need {self._config.ma_period})",
+                reason=f"Insufficient data ({len(df)} bars, need {cfg.ma_period})",
             )
+            _log_result(result)
+            return result
 
-        rsi_val = _compute_rsi(df["Close"], self._config.rsi_period)
-        vol_osc_val = _compute_vol_osc(df["Volume"], self._config.vol_osc_fast, self._config.vol_osc_slow)
-        dist_ma_val = _compute_dist_sma(df["Close"], self._config.ma_period)
+        rsi_val = _compute_rsi(df["Close"], cfg.rsi_period)
+        vol_osc_val = _compute_vol_osc(df["Volume"], cfg.vol_osc_fast, cfg.vol_osc_slow)
+        dist_ma_val = _compute_dist_sma(df["Close"], cfg.ma_period)
 
-        cfg = self._config
+        logger.debug(json.dumps({
+            "ticker": ticker, "stage": "rsi",
+            "value": round(rsi_val, 2) if rsi_val is not None else None,
+            "min": cfg.rsi_min, "max": cfg.rsi_max,
+            "passed": rsi_val is not None and cfg.rsi_min <= rsi_val <= cfg.rsi_max,
+        }))
+        logger.debug(json.dumps({
+            "ticker": ticker, "stage": "vol_osc",
+            "value": round(vol_osc_val, 2) if vol_osc_val is not None else None,
+            "min": cfg.vol_osc_min,
+            "passed": vol_osc_val is not None and vol_osc_val > cfg.vol_osc_min,
+        }))
+        logger.debug(json.dumps({
+            "ticker": ticker, "stage": "dist_ma",
+            "value": round(dist_ma_val, 2) if dist_ma_val is not None else None,
+            "min": cfg.dist_ma_min, "max": cfg.dist_ma_max,
+            "passed": dist_ma_val is not None and cfg.dist_ma_min <= dist_ma_val <= cfg.dist_ma_max,
+        }))
 
         if rsi_val is None:
-            return ScreenerResult(ticker=ticker, passed=False, rsi=None, vol_osc=vol_osc_val, dist_ma_pct=dist_ma_val, reason="RSI could not be computed")
-        if not (cfg.rsi_min <= rsi_val <= cfg.rsi_max):
-            return ScreenerResult(ticker=ticker, passed=False, rsi=rsi_val, vol_osc=vol_osc_val, dist_ma_pct=dist_ma_val, reason=f"RSI {rsi_val:.1f} outside [{cfg.rsi_min}, {cfg.rsi_max}]")
+            result = ScreenerResult(ticker=ticker, passed=False, rsi=None, vol_osc=vol_osc_val, dist_ma_pct=dist_ma_val, reason="RSI could not be computed")
+        elif not (cfg.rsi_min <= rsi_val <= cfg.rsi_max):
+            result = ScreenerResult(ticker=ticker, passed=False, rsi=rsi_val, vol_osc=vol_osc_val, dist_ma_pct=dist_ma_val, reason=f"RSI {rsi_val:.1f} outside [{cfg.rsi_min}, {cfg.rsi_max}]")
+        elif vol_osc_val is None:
+            result = ScreenerResult(ticker=ticker, passed=False, rsi=rsi_val, vol_osc=None, dist_ma_pct=dist_ma_val, reason="VolOsc could not be computed")
+        elif vol_osc_val <= cfg.vol_osc_min:
+            result = ScreenerResult(ticker=ticker, passed=False, rsi=rsi_val, vol_osc=vol_osc_val, dist_ma_pct=dist_ma_val, reason=f"VolOsc {vol_osc_val:.2f}% ≤ {cfg.vol_osc_min}")
+        elif dist_ma_val is None:
+            result = ScreenerResult(ticker=ticker, passed=False, rsi=rsi_val, vol_osc=vol_osc_val, dist_ma_pct=None, reason="DistMA could not be computed")
+        elif not (cfg.dist_ma_min <= dist_ma_val <= cfg.dist_ma_max):
+            result = ScreenerResult(ticker=ticker, passed=False, rsi=rsi_val, vol_osc=vol_osc_val, dist_ma_pct=dist_ma_val, reason=f"DistMA {dist_ma_val:.1f}% outside [{cfg.dist_ma_min}%, {cfg.dist_ma_max}%]")
+        else:
+            result = ScreenerResult(ticker=ticker, passed=True, rsi=rsi_val, vol_osc=vol_osc_val, dist_ma_pct=dist_ma_val, reason="PASS")
 
-        if vol_osc_val is None:
-            return ScreenerResult(ticker=ticker, passed=False, rsi=rsi_val, vol_osc=None, dist_ma_pct=dist_ma_val, reason="VolOsc could not be computed")
-        if vol_osc_val <= cfg.vol_osc_min:
-            return ScreenerResult(ticker=ticker, passed=False, rsi=rsi_val, vol_osc=vol_osc_val, dist_ma_pct=dist_ma_val, reason=f"VolOsc {vol_osc_val:.2f}% ≤ {cfg.vol_osc_min}")
+        _log_result(result)
+        return result
 
-        if dist_ma_val is None:
-            return ScreenerResult(ticker=ticker, passed=False, rsi=rsi_val, vol_osc=vol_osc_val, dist_ma_pct=None, reason="DistMA could not be computed")
-        if not (cfg.dist_ma_min <= dist_ma_val <= cfg.dist_ma_max):
-            return ScreenerResult(ticker=ticker, passed=False, rsi=rsi_val, vol_osc=vol_osc_val, dist_ma_pct=dist_ma_val, reason=f"DistMA {dist_ma_val:.1f}% outside [{cfg.dist_ma_min}%, {cfg.dist_ma_max}%]")
 
-        return ScreenerResult(ticker=ticker, passed=True, rsi=rsi_val, vol_osc=vol_osc_val, dist_ma_pct=dist_ma_val, reason="PASS")
+def _log_result(result: ScreenerResult) -> None:
+    logger.info(json.dumps({
+        "ticker": result.ticker,
+        "passed": result.passed,
+        "rsi": round(result.rsi, 2) if result.rsi is not None else None,
+        "vol_osc": round(result.vol_osc, 2) if result.vol_osc is not None else None,
+        "dist_ma_pct": round(result.dist_ma_pct, 2) if result.dist_ma_pct is not None else None,
+        "reason": result.reason,
+    }))
 
 
 # ── Indicator helpers (pure pandas, no extra deps) ────────────────────────────

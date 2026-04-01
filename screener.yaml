@@ -1,0 +1,39 @@
+# screener.yaml — Per-ticker screener threshold configuration
+#
+# All fields under 'defaults' are optional; omitted fields use the code defaults
+# (RSI 50–70, VolOsc > 0, DistMA ±5%). These can also be overridden at runtime
+# via CLI flags (--rsi-min, --rsi-max, etc.) which take precedence over this file.
+#
+# Per-ticker entries under 'tickers' override only the fields you specify;
+# everything else falls back to the effective defaults.
+#
+# Configurable threshold fields:
+#   rsi_min      float  RSI lower bound (default: 50.0)
+#   rsi_max      float  RSI upper bound (default: 70.0)
+#   vol_osc_min  float  Volume Oscillator must be > this value (default: 0.0)
+#   dist_ma_min  float  Distance from SMA50 lower bound, % (default: -5.0)
+#   dist_ma_max  float  Distance from SMA50 upper bound, % (default: 5.0)
+
+defaults:
+  rsi_min: 50.0
+  rsi_max: 70.0
+  vol_osc_min: 0.0
+  dist_ma_min: -5.0
+  dist_ma_max: 5.0
+
+tickers:
+  # Example: AAPL tends to trade at a higher RSI floor during bull markets
+  # AAPL:
+  #   rsi_min: 45.0
+  #   rsi_max: 75.0
+
+  # Example: broader range for volatile stocks like TSLA
+  # TSLA:
+  #   rsi_min: 40.0
+  #   rsi_max: 75.0
+  #   dist_ma_min: -8.0
+  #   dist_ma_max: 8.0
+
+  # Example: oversold threshold for GOOG
+  # GOOG:
+  #   rsi_min: 30.0

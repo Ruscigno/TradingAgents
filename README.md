@@ -50,7 +50,7 @@
 
 <div align="center">
 
-🚀 [TradingAgents](#tradingagents-framework) | ⚡ [Installation & CLI](#installation-and-cli) | 🎬 [Demo](https://www.youtube.com/watch?v=90gr5lwjIho) | 📦 [Package Usage](#tradingagents-package) | 🤝 [Contributing](#contributing) | 📄 [Citation](#citation)
+🚀 [TradingAgents](#tradingagents-framework) | ⚡ [Installation & CLI](#installation-and-cli) | 🎬 [Demo](https://www.youtube.com/watch?v=90gr5lwjIho) | 📦 [Package Usage](#tradingagents-package) | 🔍 [Screen & Trade](#screen--trade-bulk-screener--llm-pipeline) | 🤝 [Contributing](#contributing) | 📄 [Citation](#citation)
 
 </div>
 
@@ -247,6 +247,180 @@ config["checkpoint_enabled"] = True
 ta = TradingAgentsGraph(config=config)
 _, decision = ta.propagate("NVDA", "2026-01-15")
 ```
+
+## Screen & Trade: Bulk Screener + LLM Pipeline
+
+`screen_and_trade.py` is the entry point for running the full pipeline against a large universe of tickers. It has two stages:
+
+1. **Pre-flight technical screener** — filters all tickers using RSI, Volume Oscillator, and Distance from SMA50. Pure Python, no LLM calls. Only tickers that pass all three filters advance.
+2. **LLM pipeline** — runs `TradingAgentsGraph.propagate()` on each candidate and prints a BUY / OVERWEIGHT / HOLD / UNDERWEIGHT / SELL decision.
+
+Data for both stages is fetched from the **Market Data Service (MDS)** — a local InfluxDB-backed OHLCV cache — with automatic fallback to Yahoo Finance when MDS is unavailable.
+
+### Prerequisites
+
+MDS must be running and reachable (default: `http://localhost:8080`). If it is not available the screener falls back to Yahoo Finance automatically and logs a warning.
+
+### Quick Start
+
+```bash
+# Dry run: screen all tickers tracked by MDS, print results, skip LLM calls
+python screen_and_trade.py --dry-run --date 2026-04-01
+
+# Full run on up to 5 candidates
+python screen_and_trade.py --date 2026-04-01 --max-candidates 5
+
+# Screen a specific subset of tickers
+python screen_and_trade.py --dry-run --tickers AAPL NVDA MSFT TSLA AMZN
+```
+
+### CLI Reference
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--date YYYY-MM-DD` | today | Trade date. OHLCV data up to and including this date is used. |
+| `--mds-url URL` | `http://localhost:8080` | Market Data Service base URL. |
+| `--tickers T1 T2 ...` | all MDS tickers | Override the universe with a specific set of tickers. |
+| `--screener-config PATH` | `screener.yaml` | YAML file with per-ticker threshold overrides (see below). Silently ignored if the file is absent. |
+| `--rsi-min FLOAT` | `50.0` | Default RSI lower bound. |
+| `--rsi-max FLOAT` | `70.0` | Default RSI upper bound. |
+| `--vol-osc-min FLOAT` | `0.0` | Default Volume Oscillator minimum (%). |
+| `--dist-ma-min FLOAT` | `-5.0` | Default Distance from SMA50 lower bound (%). |
+| `--dist-ma-max FLOAT` | `5.0` | Default Distance from SMA50 upper bound (%). |
+| `--analysts LIST` | `market,news,fundamentals` | Comma-separated list of LLM analysts to run. |
+| `--max-candidates N` | `20` | Safety cap: at most N tickers enter the LLM pipeline. |
+| `--dry-run` | off | Run screening only — skip all LLM calls. |
+| `--output FILE` | — | Save a full JSON report (screening + decisions) to FILE. |
+| `--verbose` / `-v` | off | Emit structured JSON debug logs on stderr (see Debugging below). |
+
+### Screener Thresholds
+
+The default thresholds target stocks in a **bullish momentum zone**:
+
+| Indicator | Formula | Default |
+|-----------|---------|---------|
+| RSI(14) | Wilder's smoothed RSI on daily Close | 50 ≤ RSI ≤ 70 |
+| Volume Oscillator | `(EMA(Vol,5) − EMA(Vol,20)) / EMA(Vol,20) × 100` | > 0 % |
+| Distance from SMA50 | `(Close − SMA50) / SMA50 × 100` | −5 % to +5 % |
+
+A ticker must pass **all three** filters to become a candidate. Results are printed whether they pass or fail, so you can see exactly which filter caused a rejection.
+
+CLI flags (`--rsi-min`, etc.) set the global defaults for all tickers. Use `screener.yaml` for per-ticker overrides.
+
+### Per-Ticker Configuration (`screener.yaml`)
+
+Create (or edit) `screener.yaml` in the project root to tune thresholds per ticker without changing the CLI defaults.
+
+```yaml
+# screener.yaml
+defaults:
+  rsi_min: 50.0
+  rsi_max: 70.0
+  vol_osc_min: 0.0
+  dist_ma_min: -5.0
+  dist_ma_max: 5.0
+
+tickers:
+  AAPL:
+    rsi_min: 45.0      # more lenient floor for AAPL
+    rsi_max: 75.0
+
+  TSLA:
+    rsi_min: 40.0      # volatile stock — wider RSI band
+    rsi_max: 75.0
+    dist_ma_min: -8.0
+    dist_ma_max: 8.0
+
+  GOOG:
+    rsi_min: 30.0      # allow oversold entries for GOOG
+```
+
+**Merging rules** (highest priority wins):
+
+```
+per-ticker YAML entry  >  YAML defaults: section  >  CLI flags  >  code defaults
+```
+
+Only the five threshold fields (`rsi_min`, `rsi_max`, `vol_osc_min`, `dist_ma_min`, `dist_ma_max`) are configurable per ticker. Structural parameters (`rsi_period`, `ma_period`, `lookback_days`) are global and cannot be changed per ticker.
+
+Pass a different file with `--screener-config /path/to/my_config.yaml`. If the file does not exist the screener silently falls back to the effective defaults.
+
+### Debugging: Why Was a Ticker Dropped?
+
+Add `--verbose` to get one structured JSON log line per indicator per ticker, written to **stderr** (stdout stays clean for the summary table):
+
+```bash
+python screen_and_trade.py --dry-run --date 2026-04-01 --tickers AAPL --verbose
+```
+
+Example stderr output:
+
+```json
+{"stage": "mds_connect", "url": "http://localhost:8080", "healthy": true}
+{"stage": "tickers_resolved", "source": "cli_flag", "count": 1}
+{"ticker": "AAPL", "stage": "fetch", "start": "2025-11-11", "end": "2026-04-01", "rsi_threshold": [50.0, 70.0], "vol_osc_min": 0.0, "dist_ma_range": [-5.0, 5.0]}
+{"ticker": "AAPL", "stage": "data_trimmed", "bars": 96}
+{"ticker": "AAPL", "stage": "rsi",     "value": 38.9,   "min": 50.0, "max": 70.0, "passed": false}
+{"ticker": "AAPL", "stage": "vol_osc", "value": -25.77, "min": 0.0,               "passed": false}
+{"ticker": "AAPL", "stage": "dist_ma", "value": -4.41,  "min": -5.0, "max": 5.0,  "passed": true}
+{"ticker": "AAPL", "passed": false, "rsi": 38.9, "vol_osc": -25.77, "dist_ma_pct": -4.41, "reason": "RSI 38.9 outside [50.0, 70.0]"}
+```
+
+Useful grep patterns:
+
+```bash
+# See only the final verdict for every ticker
+python screen_and_trade.py --dry-run --verbose 2>&1 | grep '"passed"' | python -m json.tool
+
+# Find all tickers that failed because of RSI
+python screen_and_trade.py --dry-run --verbose 2>&1 | grep '"stage": "rsi"' | grep '"passed": false'
+
+# Follow a single ticker through every stage
+python screen_and_trade.py --dry-run --verbose 2>&1 | grep '"ticker": "AAPL"'
+
+# Capture debug logs to a file while keeping the summary on screen
+python screen_and_trade.py --dry-run --verbose 2>/tmp/debug.jsonl
+```
+
+### Data Vendors and Fallback
+
+OHLCV and technical indicator data is routed through a **vendor chain**:
+
+```
+MDS (local cache)  →  yfinance (fallback)  →  Alpha Vantage (fallback)
+```
+
+- MDS is tried first for `get_stock_data` and `get_indicators`.
+- If MDS is unreachable or a ticker is not tracked, the request transparently falls through to Yahoo Finance.
+- Fundamentals, news, and insider transactions always use yfinance (MDS does not provide these).
+
+To force yfinance for all data (e.g. if MDS is not set up), edit `tradingagents/default_config.py`:
+
+```python
+"data_vendors": {
+    "core_stock_apis": "yfinance",
+    "technical_indicators": "yfinance",
+    ...
+}
+```
+
+Or override per-tool:
+
+```python
+"tool_vendors": {
+    "get_stock_data": "yfinance",
+}
+```
+
+### Saving a Full Report
+
+```bash
+python screen_and_trade.py --date 2026-04-01 --output report.json
+```
+
+The JSON report includes the screener config used, per-ticker screening results (with indicator values and the exact failure reason), and all trade decisions.
+
+---
 
 ## Contributing
 

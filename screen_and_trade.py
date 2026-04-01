@@ -2,6 +2,7 @@
 
 Usage:
     python screen_and_trade.py --dry-run --date 2026-04-01
+    python screen_and_trade.py --dry-run --date 2026-04-01 --verbose
     python screen_and_trade.py --date 2026-04-01 --max-candidates 5
 
 The script:
@@ -11,18 +12,45 @@ The script:
   3. Prints a screening summary table.
   4. For each passing ticker (unless --dry-run), runs TradingAgentsGraph.propagate()
      and prints the final trade decision.
+
+Debug logging:
+  Pass --verbose to emit structured JSON log lines on stderr for every
+  indicator computation and filtering decision. Useful for understanding
+  exactly why a specific ticker was dropped.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from datetime import datetime
 from pathlib import Path
 
-from tradingagents.dataflows.mds_client import MDSClient, MDSUnavailableError, get_mds_client
+from tradingagents.dataflows.mds_client import MDSClient, MDSUnavailableError
+from tradingagents.screener.config_loader import ScreenerConfigLoader
 from tradingagents.screener.technical_screener import ScreenerConfig, TechnicalScreener
+
+logger = logging.getLogger(__name__)
+
+# Default config file location: screener.yaml next to this script
+_DEFAULT_CONFIG_PATH = Path(__file__).parent / "screener.yaml"
+
+
+def setup_logging(verbose: bool) -> None:
+    """Configure root logger.
+
+    With --verbose: DEBUG level, all structured JSON lines emitted to stderr.
+    Without --verbose: WARNING level (silent unless something goes wrong).
+    Format is '%(message)s' so the JSON payloads are printed as-is.
+    """
+    level = logging.DEBUG if verbose else logging.WARNING
+    logging.basicConfig(
+        level=level,
+        format="%(message)s",
+        stream=sys.stderr,
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -45,12 +73,21 @@ def parse_args() -> argparse.Namespace:
         metavar="TICKER",
         help="Override the MDS ticker list with a specific set (space-separated)",
     )
-    # Screener thresholds
-    p.add_argument("--rsi-min", type=float, default=50.0, help="RSI minimum (default: 50)")
-    p.add_argument("--rsi-max", type=float, default=70.0, help="RSI maximum (default: 70)")
-    p.add_argument("--vol-osc-min", type=float, default=0.0, help="Volume Oscillator minimum %% (default: 0)")
-    p.add_argument("--dist-ma-min", type=float, default=-5.0, help="Distance from SMA50 minimum %% (default: -5)")
-    p.add_argument("--dist-ma-max", type=float, default=5.0, help="Distance from SMA50 maximum %% (default: 5)")
+    p.add_argument(
+        "--screener-config",
+        default=str(_DEFAULT_CONFIG_PATH),
+        metavar="PATH",
+        help=(
+            f"YAML file with per-ticker threshold overrides "
+            f"(default: screener.yaml next to this script; silently ignored if absent)"
+        ),
+    )
+    # Screener thresholds (global defaults; per-ticker YAML overrides these)
+    p.add_argument("--rsi-min", type=float, default=50.0, help="Default RSI minimum (default: 50)")
+    p.add_argument("--rsi-max", type=float, default=70.0, help="Default RSI maximum (default: 70)")
+    p.add_argument("--vol-osc-min", type=float, default=0.0, help="Default Volume Oscillator minimum %% (default: 0)")
+    p.add_argument("--dist-ma-min", type=float, default=-5.0, help="Default Distance from SMA50 minimum %% (default: -5)")
+    p.add_argument("--dist-ma-max", type=float, default=5.0, help="Default Distance from SMA50 maximum %% (default: 5)")
     # Pipeline controls
     p.add_argument(
         "--analysts",
@@ -72,6 +109,11 @@ def parse_args() -> argparse.Namespace:
         "--output",
         metavar="FILE",
         help="Save JSON report to FILE",
+    )
+    p.add_argument(
+        "--verbose", "-v",
+        action="store_true",
+        help="Emit structured JSON debug logs on stderr for every indicator and filter decision",
     )
     return p.parse_args()
 
@@ -104,23 +146,28 @@ def run_llm_pipeline(candidates: list[str], trade_date: str, analysts: list[str]
         print(f"\n{'='*60}")
         print(f"Running TradingAgents for {ticker} on {trade_date}")
         print('='*60)
+        logger.info(json.dumps({"stage": "llm_pipeline_start", "ticker": ticker, "date": trade_date}))
         try:
             final_state, signal = ta.propagate(ticker, trade_date)
             decision = final_state.get("final_trade_decision", "UNKNOWN")
             print(f"  Decision: {decision}")
             print(f"  Signal:   {signal}")
+            logger.info(json.dumps({"stage": "llm_pipeline_done", "ticker": ticker, "decision": decision, "signal": signal}))
             results.append({"ticker": ticker, "decision": decision, "signal": signal})
         except Exception as exc:
             print(f"  ERROR: {exc}")
+            logger.info(json.dumps({"stage": "llm_pipeline_error", "ticker": ticker, "error": str(exc)}))
             results.append({"ticker": ticker, "decision": "ERROR", "signal": None, "error": str(exc)})
     return results
 
 
 def main() -> None:
     args = parse_args()
+    setup_logging(args.verbose)
 
     # ── 1. Connect to MDS ────────────────────────────────────────────────────
     client = MDSClient(base_url=args.mds_url)
+    logger.info(json.dumps({"stage": "mds_connect", "url": args.mds_url, "healthy": client.is_healthy()}))
     if not client.is_healthy():
         print(f"WARNING: MDS at {args.mds_url} is not reachable. Screener will fail for all tickers.", file=sys.stderr)
 
@@ -128,15 +175,17 @@ def main() -> None:
     if args.tickers:
         tickers = [t.upper() for t in args.tickers]
         print(f"Using {len(tickers)} tickers from --tickers flag")
+        logger.info(json.dumps({"stage": "tickers_resolved", "source": "cli_flag", "count": len(tickers)}))
     else:
         try:
             tickers = client.get_tickers()
             print(f"Fetched {len(tickers)} tickers from MDS")
+            logger.info(json.dumps({"stage": "tickers_resolved", "source": "mds", "count": len(tickers)}))
         except MDSUnavailableError as exc:
             print(f"ERROR: Cannot fetch tickers from MDS: {exc}", file=sys.stderr)
             sys.exit(1)
 
-    # ── 3. Screen ────────────────────────────────────────────────────────────
+    # ── 3. Build screener with per-ticker YAML config ────────────────────────
     screener_config = ScreenerConfig(
         rsi_min=args.rsi_min,
         rsi_max=args.rsi_max,
@@ -144,10 +193,21 @@ def main() -> None:
         dist_ma_min=args.dist_ma_min,
         dist_ma_max=args.dist_ma_max,
     )
-    screener = TechnicalScreener(mds_client=client, config=screener_config)
+    config_loader = ScreenerConfigLoader.from_yaml(args.screener_config, base_defaults=screener_config)
+
+    if config_loader.tickers_with_overrides():
+        logger.info(json.dumps({
+            "stage": "per_ticker_config",
+            "overrides": config_loader.tickers_with_overrides(),
+        }))
+
+    screener = TechnicalScreener(mds_client=client, config=screener_config, config_loader=config_loader)
 
     print(f"\nScreening {len(tickers)} tickers as of {args.date} ...")
-    print(f"  RSI: [{args.rsi_min}, {args.rsi_max}]  VolOsc > {args.vol_osc_min}%  DistMA: [{args.dist_ma_min}%, {args.dist_ma_max}%]\n")
+    print(f"  Default thresholds — RSI: [{args.rsi_min}, {args.rsi_max}]  VolOsc > {args.vol_osc_min}%  DistMA: [{args.dist_ma_min}%, {args.dist_ma_max}%]")
+    if config_loader.tickers_with_overrides():
+        print(f"  Per-ticker overrides loaded for: {', '.join(config_loader.tickers_with_overrides())}")
+    print()
 
     screen_results = screener.screen(tickers, args.date)
     print_screening_table(screen_results)
@@ -161,6 +221,7 @@ def main() -> None:
 
     if len(candidates) > args.max_candidates:
         print(f"Capping candidates to {args.max_candidates} (use --max-candidates to change)")
+        logger.info(json.dumps({"stage": "candidate_capped", "from": len(candidates), "to": args.max_candidates}))
         candidates = candidates[: args.max_candidates]
 
     # ── 4. LLM pipeline ─────────────────────────────────────────────────────
@@ -180,7 +241,6 @@ def main() -> None:
                 "news_data": "yfinance",
             },
         }
-        # Import DEFAULT_CONFIG and merge so all required keys are present
         from tradingagents.default_config import DEFAULT_CONFIG
         merged = {**DEFAULT_CONFIG, **ta_config}
         trade_results = run_llm_pipeline(candidates, args.date, analysts, merged)
@@ -199,6 +259,8 @@ def main() -> None:
         report = {
             "date": args.date,
             "screener_config": vars(screener_config),
+            "screener_config_file": args.screener_config,
+            "per_ticker_overrides": config_loader.tickers_with_overrides(),
             "screening": [
                 {
                     "ticker": r.ticker,
