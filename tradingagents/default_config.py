@@ -49,4 +49,7 @@ DEFAULT_CONFIG = {
     "tool_vendors": {
         # Example: "get_stock_data": "alpha_vantage",  # Override category default
     },
+    # Telegram bot integration (optional — used by scheduler for push notifications)
+    "telegram_bot_token": None,
+    "telegram_chat_id": None,
 }

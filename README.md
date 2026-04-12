@@ -50,7 +50,7 @@
 
 <div align="center">
 
-🚀 [TradingAgents](#tradingagents-framework) | ⚡ [Installation & CLI](#installation-and-cli) | 🎬 [Demo](https://www.youtube.com/watch?v=90gr5lwjIho) | 📦 [Package Usage](#tradingagents-package) | 🔍 [Screen & Trade](#screen--trade-bulk-screener--llm-pipeline) | 🤝 [Contributing](#contributing) | 📄 [Citation](#citation)
+🚀 [TradingAgents](#tradingagents-framework) | ⚡ [Installation & CLI](#installation-and-cli) | 🎬 [Demo](https://www.youtube.com/watch?v=90gr5lwjIho) | 📦 [Package Usage](#tradingagents-package) | 🔍 [Screen & Trade](#screen--trade-bulk-screener--llm-pipeline) | 📱 [Telegram Bot](TELEGRAM_INTEGRATION.md) | 🤝 [Contributing](#contributing) | 📄 [Citation](#citation)
 
 </div>
 
@@ -419,6 +419,16 @@ python screen_and_trade.py --date 2026-04-01 --output report.json
 ```
 
 The JSON report includes the screener config used, per-ticker screening results (with indicator values and the exact failure reason), and all trade decisions.
+
+---
+
+## Telegram Bot (via OpenClaw)
+
+Control the full pipeline from your phone using Telegram commands. The integration uses [OpenClaw](https://openclaw.ai/) to connect Telegram to a Claude agent, which runs TradingAgents tools via an MCP server on your local Mac.
+
+Available commands: `/analyze`, `/screen`, `/rejected`, `/status`, `/last`, `/schedule`
+
+See the **[Telegram Integration Guide](TELEGRAM_INTEGRATION.md)** for the complete setup walkthrough, command reference, and troubleshooting.
 
 ---
 

@@ -1,0 +1,68 @@
+// OpenClaw configuration for TradingAgents Telegram integration.
+//
+// Copy this file to ~/.openclaw/config.json5 and fill in:
+//   1. The absolute paths to your TradingAgents directory (2 places)
+//   2. Your Telegram User ID (from @userinfobot)
+//
+// Environment variables referenced with ${VAR} are read at runtime:
+//   - ANTHROPIC_API_KEY  → set in ~/.zshrc  (not needed when using Ollama)
+//   - TELEGRAM_BOT_TOKEN → set in ~/.zshrc
+//
+// See TELEGRAM_INTEGRATION.md for the full setup guide.
+// See LOCAL_LLM_SETUP.md for running with a local model via Ollama.
+
+{
+  // --- Ollama (local) ---
+  llm: {
+    provider: "ollama",
+    model: "gemma3:27b",
+    baseUrl: "http://192.168.0.156:11434/v1",
+    apiKey: "ollama",
+  },
+
+  // --- Option A: Anthropic (cloud) ---
+  // Requires ANTHROPIC_API_KEY in ~/.zshrc
+  //
+  // llm: {
+  //   provider: "anthropic",
+  //   model: "claude-sonnet-4-6",
+  //   apiKey: "${ANTHROPIC_API_KEY}",
+  // },
+
+  mcp: {
+    servers: {
+      trading: {
+        command: "python",
+        args: ["/ABSOLUTE/PATH/TO/TradingAgents/tradingagents/bot/mcp_server.py"],
+        //      ^^^^^^^^^^^^^^^^^^^^^ replace with your actual path
+        env: {
+          PYTHONPATH: "/ABSOLUTE/PATH/TO/TradingAgents",
+          //           ^^^^^^^^^^^^^^^^^^^^^ replace with your actual path
+          MDS_BASE_URL: "http://localhost:8080",
+        }
+      }
+    }
+  },
+
+  channels: {
+    telegram: {
+      enabled: true,
+      botToken: "${TELEGRAM_BOT_TOKEN}",
+      dmPolicy: "owner",
+      ownerUserId: "YOUR_TELEGRAM_USER_ID",  // ← paste the number from @userinfobot
+      commands: {
+        native: "auto",
+      },
+      customCommands: {
+        analyze:  { prompt: "Run full stock analysis with these parameters: {args}" },
+        screen:   { prompt: "Run screener only (no LLM) with these parameters: {args}" },
+        rejected: { prompt: "Show tickers that failed screening. Parameters: {args}" },
+        status:   { prompt: "Check health of all trading services." },
+        last:     { prompt: "Show the last cached result for command: {args}" },
+        schedule: { prompt: "Manage scheduled analysis runs. Action and parameters: {args}" },
+      }
+    }
+  },
+
+  systemPrompt: "You are a personal stock trading assistant. You have tools to run technical screening and LLM-based analysis on stocks tracked by the Market Data Service. Always use the available tools to answer trading-related questions. Format results clearly using Telegram Markdown. For /analyze and /screen, always show indicator values (RSI, VolOsc %, DistMA %) alongside the decision or pass/fail status. For scheduled runs, remind the user they will receive automatic push notifications."
+}

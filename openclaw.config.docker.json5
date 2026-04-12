@@ -1,0 +1,98 @@
+// OpenClaw configuration for TradingAgents Telegram integration (Docker version).
+//
+// This file is used inside the Docker container.
+// Updated for OpenClaw 2026.4.9 schema.
+//
+// See LOCAL_LLM_SETUP.md for instructions on switching to a local model via Ollama.
+
+{
+  "$schema": "https://docs.openclaw.ai/schemas/openclaw.json",
+
+  "gateway": {
+    "mode": "local",
+  },
+
+  "agents": {
+    "defaults": {
+      "systemPromptOverride": "You are a personal stock trading assistant. You have tools to run technical screening and LLM-based analysis on stocks tracked by the Market Data Service. Always use the available tools to answer trading-related questions. Format results clearly using Telegram Markdown.\n\n### COMMAND HANDLING\nWhen you see the following slash commands in the message history, take the corresponding action:\n- /analyze: Run full stock analysis with the provided tickers/parameters.\n- /screen: Run technical screener only (no LLM) with the provided parameters.\n- /rejected: Show tickers that failed technical screening from the last run.\n- /status: Check the health of all trading services and MCP servers.\n- /last: Show the last cached result for a specific command.\n- /schedule: Manage scheduled analysis runs (add, list, delete).\n\nAlways show indicator values (RSI, VolOsc %, DistMA %) alongside the decision or pass/fail status. For scheduled runs, remind the user they will receive automatic push notifications.",
+
+      // --- Ollama (remote laptop) ---
+      "model": {
+        "primary": "ollama/gemma3:27b",
+      },
+
+      // --- Option A: Anthropic (cloud) ---
+      // Replace the model block above with this to use Anthropic:
+      //
+      // "model": {
+      //   "primary": "anthropic/claude-3-5-sonnet-latest",
+      // },
+    }
+  },
+
+  "models": {
+    "providers": {
+      // --- Ollama (remote laptop at 192.168.0.156) ---
+      "ollama": {
+        "baseUrl": "http://192.168.0.156:11434/v1",
+        "apiKey": "ollama",
+        "models": [
+          {
+            "id": "gemma3:27b",
+            "name": "Gemma 3 27B (remote)",
+            "input": ["text"],
+            "contextWindow": 131072,
+          }
+        ],
+      },
+
+      // --- Option A: Anthropic (cloud) ---
+      // Uncomment and switch model.primary to "anthropic/claude-3-5-sonnet-latest" to use cloud:
+      //
+      // "anthropic": {
+      //   "baseUrl": "https://api.anthropic.com/v1",
+      //   "apiKey": "${ANTHROPIC_API_KEY}",
+      //   "models": [
+      //     {
+      //       "id": "claude-3-5-sonnet-latest",
+      //       "name": "Claude 3.5 Sonnet",
+      //       "input": ["text", "image"],
+      //       "contextWindow": 200000,
+      //     }
+      //   ],
+      // },
+    }
+  },
+
+  "mcp": {
+    "servers": {
+      "trading": {
+        "command": "python",
+        "args": ["/app/tradingagents/bot/mcp_server.py"],
+        "env": {
+          "PYTHONPATH": "/app",
+          "MDS_BASE_URL": "http://api:8080",
+        }
+      }
+    }
+  },
+
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "botToken": "${TELEGRAM_BOT_TOKEN}",
+      "dmPolicy": "allowlist",
+      "allowFrom": ["${TELEGRAM_USER_ID}"],
+      "commands": {
+        "native": "auto",
+      },
+      "customCommands": [
+        { "command": "analyze",  "description": "Run full stock analysis" },
+        { "command": "screen",   "description": "Run screener only" },
+        { "command": "rejected", "description": "Show rejected tickers" },
+        { "command": "last",     "description": "Show last result" },
+        { "command": "schedule", "description": "Manage schedules" }
+      ]
+    }
+  }
+}
