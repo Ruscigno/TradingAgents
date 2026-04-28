@@ -1,0 +1,46 @@
+name: ta-hermes
+
+services:
+  hermes:
+    build:
+      context: .
+      args:
+        HERMES_VERSION: v2026.4.23
+    image: tradingagents/hermes-agent:2026.4.23
+    container_name: tradingagents-hermes
+    restart: unless-stopped
+    command: ["gateway", "run"]
+
+    environment:
+      HERMES_HOME: /home/hermes/.hermes
+      HERMES_ACCEPT_HOOKS: "1"
+      # market-data-service MCP (alcançado via host bridge)
+      MDS_BASE_URL: http://host.docker.internal:8080
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    volumes:
+      # Project-local Hermes config + secrets (gitignored).
+      - ./.env:/home/hermes/.hermes/.env:ro
+      - ./config.yaml:/home/hermes/.hermes/config.yaml:ro
+
+      # State (sessions, cron state, skills, memory) — persistente entre restarts.
+      - ./data:/home/hermes/.hermes/data:rw
+      - ./data/sessions:/home/hermes/.hermes/sessions:rw
+      - ./data/memories:/home/hermes/.hermes/memories:rw
+      - ./data/skills:/home/hermes/.hermes/skills:rw
+      - ./data/state:/home/hermes/.hermes/state:rw
+
+      # Cron prompts (ver hermes/cron/*.md). Read-only.
+      - ./cron:/home/hermes/.hermes/cron:ro
+
+      # The TradingAgents project itself, mounted writable for cli execution.
+      - ..:/workspace:rw
+
+    healthcheck:
+      test: ["CMD", "hermes", "status"]
+      interval: 120s
+      timeout: 15s
+      retries: 5
+      start_period: 60s

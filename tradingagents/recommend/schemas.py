@@ -94,3 +94,76 @@ class FundamentalsVerdict(_AnalystVerdict):
     Judges whether the company's financial profile (valuation, margins,
     growth, debt) supports the trade thesis.
     """
+
+
+class BullCase(BaseModel):
+    """Etapa 4 — output of the Bull researcher (one round, filter mode)."""
+
+    thesis: str = Field(description="Short thesis for going long. 2-3 sentences max.", max_length=1500)
+    key_arguments: list[str] = Field(
+        description="2-4 bullet-style arguments backing the long thesis.",
+        min_length=1,
+        max_length=6,
+    )
+
+
+class BearCase(BaseModel):
+    """Etapa 4 — output of the Bear researcher (one round, filter mode)."""
+
+    thesis: str = Field(description="Short thesis for skipping or shorting. 2-3 sentences max.", max_length=1500)
+    key_arguments: list[str] = Field(
+        description="2-4 bullet-style arguments backing the bearish thesis.",
+        min_length=1,
+        max_length=6,
+    )
+
+
+class DebateVerdict(BaseModel):
+    """Etapa 4 — Judge's verdict after weighing Bull vs Bear arguments."""
+
+    verdict: Verdict
+    confidence: float = Field(ge=0.0, le=1.0)
+    direction: Direction = Field(description="Implied trade direction. 'none' if NO_PASS or unclear.")
+    rationale: str = Field(description="One paragraph explaining how the judge weighed bull vs bear.", max_length=1500)
+
+
+class ResearchPlan(BaseModel):
+    """Etapa 5 — Research Manager consolidated investment plan."""
+
+    verdict: Verdict
+    confidence: float = Field(ge=0.0, le=1.0)
+    direction: Direction
+    investment_plan: str = Field(
+        description=(
+            "Detailed investment plan in markdown. Cover: thesis, entry "
+            "trigger, time horizon, key catalysts, monitoring metrics."
+        ),
+        max_length=4000,
+    )
+    key_risks: list[str] = Field(
+        description="Top risks that could invalidate the thesis.",
+        min_length=1,
+        max_length=8,
+    )
+
+
+class TradeDecision(BaseModel):
+    """Etapa 6 — Final trade decision from the Portfolio Manager."""
+
+    verdict: Verdict
+    confidence: float = Field(ge=0.0, le=1.0)
+    action: Literal["BUY", "SELL", "HOLD"] = Field(
+        description="BUY / SELL / HOLD. HOLD => verdict should be NO_PASS (not a trade).",
+    )
+    stop_loss: float = Field(
+        description="Stop-loss price in dollars. Use 0 if action is HOLD.",
+        ge=0.0,
+    )
+    take_profit: float = Field(
+        description="Take-profit target price in dollars. Use 0 if action is HOLD.",
+        ge=0.0,
+    )
+    rationale: str = Field(
+        description="Final rationale tying together all upstream analysis.",
+        max_length=2000,
+    )

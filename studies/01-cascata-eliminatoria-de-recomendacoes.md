@@ -746,6 +746,87 @@ Estimativa total: ~15–20h de implementação até primeira recomendação auto
 
 ---
 
+## Status de implementação (2026-04-27)
+
+A cascata foi implementada do zero conforme este estudo. Status por etapa:
+
+| # | Componente | Status | Arquivo |
+|---|---|---|---|
+| 0 | `is_trading_day()` (XNYS) | ✅ | [`recommend/calendar.py`](../tradingagents/recommend/calendar.py) |
+| 0 | Universe via MCP `list_tickers` | ✅ | [`recommend/stage_universe.py`](../tradingagents/recommend/stage_universe.py) |
+| 1 | Technical screener (RSI/VolOsc/SMA50) | ✅ | [`recommend/stage_screener.py`](../tradingagents/recommend/stage_screener.py) |
+| 2 | Market Analyst (Kimi K2.6 structured output) | ✅ | [`recommend/stage_market.py`](../tradingagents/recommend/stage_market.py) |
+| 3 | Sentiment + News + Fundamentals + composite + veto | ✅ | [`recommend/stage_analysts.py`](../tradingagents/recommend/stage_analysts.py) |
+| 4 | Bull × Bear debate + judge | ✅ | [`recommend/stage_debate.py`](../tradingagents/recommend/stage_debate.py) |
+| 5 | Research Manager consolidator | ✅ | [`recommend/stage_research.py`](../tradingagents/recommend/stage_research.py) |
+| 6 | Trader + Risk debate + Portfolio Manager | ✅ | [`recommend/stage_decision.py`](../tradingagents/recommend/stage_decision.py) |
+| — | Cliente MCP sync | ✅ | [`recommend/mcp_client.py`](../tradingagents/recommend/mcp_client.py) |
+| — | LLM helper (Kimi K2.6 via OpenRouter) | ✅ | [`recommend/llm.py`](../tradingagents/recommend/llm.py) |
+| — | Schemas Pydantic (todos os verdicts) | ✅ | [`recommend/schemas.py`](../tradingagents/recommend/schemas.py) |
+| — | Orchestrator: skip-on-zero + final score + ordering | ✅ | [`recommend/orchestrator.py`](../tradingagents/recommend/orchestrator.py) |
+| — | Persistência JSON em `eval_results/_recommend_runs/` | ✅ | [`recommend/persistence.py`](../tradingagents/recommend/persistence.py) |
+| — | CLI `recommend --dry-run` / `--full` | ✅ | [`cli/main.py`](../cli/main.py) |
+| — | Container Hermes scaffold + cron skill diário | ✅ scaffold | [`hermes/`](../hermes/) |
+| — | Tests | ✅ 263 unit / 4 live opt-in | [`tests/test_recommend_*.py`](../tests/) |
+
+**End-to-end smoke validado** com 2 candidates sintéticos (`AAPL`, `NVDA`) passando por todas as 6 etapas:
+- Cascade chain funciona (skip-on-zero quando uma etapa zera)
+- Eliminations carregam razões substantivas do LLM
+- Snapshot JSON persistido com sucesso
+- Tempo: ~4.3 min para 2 tickers em todas as etapas (Kimi K2.6, parallelism=2)
+
+### Deferido para sessão futura (e por quê)
+
+| Item | Por que ficou de fora desta sessão |
+|---|---|
+| **Build da imagem Hermes** (`docker build` no `~/projects/TradingAgents/hermes/`) | Heavy (~5-10 min), requer decisão de bot Telegram (criar `@sander_recommend_bot` separado, ou compartilhar com o do market-data-service?), exige `OPENROUTER_API_KEY` configurado no `.env` local. Scaffold pronto; comando final é `cd hermes && docker compose up -d --build`. |
+| **Activate cron diário** | Depende do container Hermes estar de pé. Skill já está em [`hermes/cron/daily-recommend.md`](../hermes/cron/daily-recommend.md) — Hermes lê automaticamente quando o container sobe. |
+| **Backtest framework** | Trabalho de design separado (~3h+): definir período, capital base, função-objetivo (Sharpe? P&L absoluto?), interface com retornos históricos do MDS, comparativo com baseline (e.g., buy-and-hold S&P 500). Bom candidato para estudo `03`. |
+| **Calibração de thresholds** | `confidence_min` defaults (0.6, 0.65, 0.7) são chutes. Após 10-20 runs reais com cron diário, ajustar com base em frequência de PASS / qualidade dos PASS. Não bloqueante. |
+| **Sentiment data source proprio** | Atualmente `Stage 3 sentiment` usa o mesmo news data com prompt diferente (mesmo padrão do upstream). Para sinal mais granular, integrar Tavily / Reddit API (decisão de custo extra vs valor agregado). |
+
+### Como rodar agora (sem o container Hermes)
+
+```bash
+cd ~/projects/TradingAgents
+
+# Dry-run (etapas 0+1, sem LLM, $0)
+python -m cli.main recommend --dry-run
+
+# Pipeline completo (todas as 6 etapas, ~$0.10-0.30 por dia se filtrar até 2-3 candidatas)
+python -m cli.main recommend --full --date 2026-04-27
+
+# Saída em `eval_results/_recommend_runs/{date}_{run_id}.json`
+ls eval_results/_recommend_runs/
+```
+
+### Como ativar o cron diário (Telegram delivery)
+
+Quando você quiser, siga a sequência:
+
+```bash
+cd ~/projects/TradingAgents/hermes
+
+# 1) Criar o bot do Telegram via @BotFather, copiar o token.
+# 2) Popular .env (a partir de .env.example):
+cp .env.example .env
+# editar .env com TELEGRAM_BOT_TOKEN, TELEGRAM_HOME_CHANNEL, OPENROUTER_API_KEY
+
+# 3) Popular config.yaml — pode copiar do market-data-service-hermes que já roda:
+cp ~/projects/market-data-service/hermes/config.yaml config.yaml
+# (ou usar o config.yaml.example como ponto de partida)
+
+# 4) Build + up (5-10 min na primeira vez)
+docker compose up -d --build
+
+# 5) Verificar que o gateway conectou ao Telegram
+docker logs tradingagents-hermes | grep -i 'telegram'
+```
+
+O cron `daily-recommend.md` é lido automaticamente. Ele rodará 16:30 ET nos dias úteis (gated pelo XNYS via shell call).
+
+---
+
 ## Apêndice — referências de arquivo
 
 - Pipeline atual: [`tradingagents/graph/setup.py`](../tradingagents/graph/setup.py), [`graph/trading_graph.py`](../tradingagents/graph/trading_graph.py)

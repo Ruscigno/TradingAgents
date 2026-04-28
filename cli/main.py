@@ -1242,7 +1242,7 @@ def recommend(
     dry_run: bool = typer.Option(
         True,
         "--dry-run/--full",
-        help="Dry-run: only stages 0+1 (no LLM, $0). LLM stages 2-6 not yet implemented.",
+        help="Dry-run: only stages 0+1 (no LLM, $0). --full runs all 6 stages with Kimi K2.6.",
     ),
     skip_calendar_check: bool = typer.Option(
         False,
@@ -1262,13 +1262,6 @@ def recommend(
     from tradingagents.screener.config_loader import ScreenerConfigLoader
     from tradingagents.screener.technical_screener import ScreenerConfig
 
-    if not dry_run:
-        console.print(
-            "[yellow]LLM pipeline (etapas 2-6) ainda não está implementado. "
-            "Rode com --dry-run.[/yellow]"
-        )
-        raise typer.Exit(1)
-
     as_of = as_of_date or _date.today().strftime("%Y-%m-%d")
     cfg = ScreenerConfig()
     loader = None
@@ -1277,9 +1270,10 @@ def recommend(
         loader = ScreenerConfigLoader.from_yaml(cfg_path, base_defaults=cfg)
         console.print(f"[dim]Using screener config: {cfg_path}[/dim]")
 
+    mode_label = "dry-run" if dry_run else "FULL (LLM stages 2-6)"
     console.print(
         Panel.fit(
-            f"[bold]Recommend (dry-run)[/bold]\n"
+            f"[bold]Recommend ({mode_label})[/bold]\n"
             f"date={as_of}  mcp={mcp_url}\n"
             f"calendar_check={'OFF' if skip_calendar_check else 'ON'}",
             border_style="cyan",
@@ -1288,19 +1282,69 @@ def recommend(
 
     client = MDSClient(base_url=mds_url)
 
-    with console.status("Running cascade…", spinner="dots"):
-        result = run_dry_run(
+    if dry_run:
+        with console.status("Running cascade (stages 0+1)…", spinner="dots"):
+            result = run_dry_run(
+                mds_client=client,
+                as_of_date=as_of,
+                mcp_url=mcp_url,
+                config=cfg,
+                config_loader=loader,
+                skip_calendar_check=skip_calendar_check,
+            )
+        _render_dry_run(result)
+        return
+
+    # ── Full pipeline ────────────────────────────────────────────────────────
+    from tradingagents.recommend.llm import LLMConfig
+    from tradingagents.recommend.orchestrator import run_full
+    from tradingagents.recommend.persistence import build_snapshot, write_snapshot
+
+    llm_cfg = LLMConfig()
+    llm_cfg.assert_api_key_present()  # fail fast if OPENROUTER_API_KEY missing
+
+    console.print(
+        f"[dim]LLM provider={llm_cfg.provider} model={llm_cfg.model}[/dim]"
+    )
+
+    with console.status("Running full cascade (this can take minutes)…", spinner="dots"):
+        result = run_full(
             mds_client=client,
             as_of_date=as_of,
             mcp_url=mcp_url,
-            config=cfg,
-            config_loader=loader,
+            llm_config=llm_cfg,
+            screener_config=cfg,
+            screener_loader=loader,
             skip_calendar_check=skip_calendar_check,
         )
 
     if result.skipped_reason:
         console.print(f"[yellow]Skipped: {result.skipped_reason}[/yellow]")
-        raise typer.Exit(0)
+        return
+
+    _render_full(result)
+
+    # Persist
+    snap = build_snapshot(
+        as_of_date=as_of,
+        universe_source=f"mcp:{mcp_url}",
+        llm_provider=llm_cfg.provider,
+        llm_model=llm_cfg.model,
+        stage_outcomes=result.stage_outcomes,
+        final=result.final,
+        total_duration_s=result.total_duration_s,
+        skipped_reason=result.skipped_reason,
+        skipped_stages=result.skipped_stages,
+    )
+    out_path = write_snapshot(snap)
+    console.print(f"[dim]Run snapshot saved to: {out_path}[/dim]")
+
+
+def _render_dry_run(result):
+    """Render dry-run (stages 0+1 only) summary + screener-passed table."""
+    if result.skipped_reason:
+        console.print(f"[yellow]Skipped: {result.skipped_reason}[/yellow]")
+        return
 
     summary = Table(title="Stage summary", box=box.SIMPLE)
     summary.add_column("Stage", style="cyan")
@@ -1325,7 +1369,7 @@ def recommend(
 
     if not result.final:
         console.print("[yellow]Nenhum ticker sobreviveu ao screener.[/yellow]")
-        raise typer.Exit(0)
+        return
 
     table = Table(title=f"Top {len(result.final)} candidatos", box=box.MINIMAL_HEAVY_HEAD)
     table.add_column("#", justify="right", style="dim")
@@ -1341,6 +1385,68 @@ def recommend(
         table.add_row(str(i), c.ticker, f"{conf:.3f}", rsi, vol, sma)
     console.print(table)
     console.print(f"[dim]Total time: {result.total_duration_s:.1f}s | cost: $0.0000[/dim]")
+
+
+def _render_full(result):
+    """Render full-cascade summary + final decisions table."""
+    summary = Table(title="Cascade stage summary", box=box.SIMPLE)
+    summary.add_column("Stage", style="cyan")
+    summary.add_column("In", justify="right")
+    summary.add_column("Passed", justify="right", style="green")
+    summary.add_column("Eliminated", justify="right", style="red")
+    summary.add_column("Time", justify="right")
+    summary.add_column("Cost $", justify="right")
+    prev_in = None
+    for o in result.stage_outcomes:
+        n_in = prev_in if prev_in is not None else len(o.candidates)
+        summary.add_row(
+            o.stage_name,
+            str(n_in),
+            str(len(o.passed)),
+            str(len(o.eliminated)),
+            f"{o.duration_s:.1f}s",
+            f"{o.cost_usd:.4f}",
+        )
+        prev_in = len(o.passed)
+    if result.skipped_stages:
+        summary.add_row(
+            "[dim]" + ", ".join(result.skipped_stages) + "[/dim]",
+            "—", "—", "—",
+            "[dim]skipped[/dim]",
+            "0.0000",
+        )
+    console.print(summary)
+
+    if not result.final:
+        console.print("[yellow]Nenhuma candidata passou pela cascata completa.[/yellow]")
+        console.print(f"[dim]Total time: {result.total_duration_s:.1f}s[/dim]")
+        return
+
+    decisions = Table(
+        title=f"Final trade recommendations (top {len(result.final)})",
+        box=box.MINIMAL_HEAVY_HEAD,
+    )
+    decisions.add_column("#", justify="right", style="dim")
+    decisions.add_column("Ticker", style="bold")
+    decisions.add_column("Action", style="bold")
+    decisions.add_column("Final score", justify="right")
+    decisions.add_column("Stop", justify="right")
+    decisions.add_column("Target", justify="right")
+    decisions.add_column("Size %", justify="right")
+    for i, c in enumerate(result.final, 1):
+        action = c.reports.get("_decision_action", "?")
+        stop = c.reports.get("_decision_stop_loss", "—")
+        target = c.reports.get("_decision_take_profit", "—")
+        size = c.reports.get("_decision_position_size_pct", "—")
+        action_color = "green" if action == "BUY" else ("red" if action == "SELL" else "yellow")
+        decisions.add_row(
+            str(i), c.ticker,
+            f"[{action_color}]{action}[/{action_color}]",
+            f"{c.final_score:.3f}" if c.final_score is not None else "—",
+            stop, target, size,
+        )
+    console.print(decisions)
+    console.print(f"[dim]Total time: {result.total_duration_s:.1f}s[/dim]")
 
 
 def _extract_screener_indicators(report: str) -> tuple[str, str, str]:
