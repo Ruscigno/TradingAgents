@@ -1217,5 +1217,145 @@ def analyze(
     run_analysis(checkpoint=checkpoint)
 
 
+@app.command()
+def recommend(
+    as_of_date: str = typer.Option(
+        None,
+        "--date",
+        help="Trade date YYYY-MM-DD. Default: today.",
+    ),
+    mcp_url: str = typer.Option(
+        "http://localhost:8080/mcp",
+        "--mcp-url",
+        help="Market-data-service MCP endpoint for ticker universe.",
+    ),
+    mds_url: str = typer.Option(
+        None,
+        "--mds-url",
+        help="Market-data-service REST URL. Default: env MDS_BASE_URL or http://localhost:8080.",
+    ),
+    screener_config: str = typer.Option(
+        "screener.yaml",
+        "--screener-config",
+        help="Path to per-ticker screener YAML overrides. Silently skipped if absent.",
+    ),
+    dry_run: bool = typer.Option(
+        True,
+        "--dry-run/--full",
+        help="Dry-run: only stages 0+1 (no LLM, $0). LLM stages 2-6 not yet implemented.",
+    ),
+    skip_calendar_check: bool = typer.Option(
+        False,
+        "--skip-calendar-check",
+        help="Skip the XNYS trading-day gate (run on weekends/holidays for testing).",
+    ),
+):
+    """Cascata eliminatória de recomendações de trade.
+
+    Etapas: 0=universe (MCP) → 1=technical screener → [2-6 = LLM, em breve].
+    Custo $0 nesta versão dry-run.
+    """
+    from datetime import date as _date
+
+    from tradingagents.dataflows.mds_client import MDSClient
+    from tradingagents.recommend.orchestrator import run_dry_run
+    from tradingagents.screener.config_loader import ScreenerConfigLoader
+    from tradingagents.screener.technical_screener import ScreenerConfig
+
+    if not dry_run:
+        console.print(
+            "[yellow]LLM pipeline (etapas 2-6) ainda não está implementado. "
+            "Rode com --dry-run.[/yellow]"
+        )
+        raise typer.Exit(1)
+
+    as_of = as_of_date or _date.today().strftime("%Y-%m-%d")
+    cfg = ScreenerConfig()
+    loader = None
+    cfg_path = Path(screener_config)
+    if cfg_path.exists():
+        loader = ScreenerConfigLoader.from_yaml(cfg_path, base_defaults=cfg)
+        console.print(f"[dim]Using screener config: {cfg_path}[/dim]")
+
+    console.print(
+        Panel.fit(
+            f"[bold]Recommend (dry-run)[/bold]\n"
+            f"date={as_of}  mcp={mcp_url}\n"
+            f"calendar_check={'OFF' if skip_calendar_check else 'ON'}",
+            border_style="cyan",
+        )
+    )
+
+    client = MDSClient(base_url=mds_url)
+
+    with console.status("Running cascade…", spinner="dots"):
+        result = run_dry_run(
+            mds_client=client,
+            as_of_date=as_of,
+            mcp_url=mcp_url,
+            config=cfg,
+            config_loader=loader,
+            skip_calendar_check=skip_calendar_check,
+        )
+
+    if result.skipped_reason:
+        console.print(f"[yellow]Skipped: {result.skipped_reason}[/yellow]")
+        raise typer.Exit(0)
+
+    summary = Table(title="Stage summary", box=box.SIMPLE)
+    summary.add_column("Stage", style="cyan")
+    summary.add_column("In", justify="right")
+    summary.add_column("Passed", justify="right", style="green")
+    summary.add_column("Eliminated", justify="right", style="red")
+    summary.add_column("Time", justify="right")
+    summary.add_column("Cost $", justify="right")
+    prev_in = None
+    for o in result.stage_outcomes:
+        n_in = prev_in if prev_in is not None else len(o.candidates)
+        summary.add_row(
+            o.stage_name,
+            str(n_in),
+            str(len(o.passed)),
+            str(len(o.eliminated)),
+            f"{o.duration_s:.1f}s",
+            f"{o.cost_usd:.4f}",
+        )
+        prev_in = len(o.passed)
+    console.print(summary)
+
+    if not result.final:
+        console.print("[yellow]Nenhum ticker sobreviveu ao screener.[/yellow]")
+        raise typer.Exit(0)
+
+    table = Table(title=f"Top {len(result.final)} candidatos", box=box.MINIMAL_HEAVY_HEAD)
+    table.add_column("#", justify="right", style="dim")
+    table.add_column("Ticker", style="bold")
+    table.add_column("Conf.", justify="right")
+    table.add_column("RSI", justify="right")
+    table.add_column("VolOsc%", justify="right")
+    table.add_column("DistSMA50%", justify="right")
+    for i, c in enumerate(result.final, 1):
+        conf = c.confidence_history.get("screener", 0.0)
+        report = c.reports.get("screener", "")
+        rsi, vol, sma = _extract_screener_indicators(report)
+        table.add_row(str(i), c.ticker, f"{conf:.3f}", rsi, vol, sma)
+    console.print(table)
+    console.print(f"[dim]Total time: {result.total_duration_s:.1f}s | cost: $0.0000[/dim]")
+
+
+def _extract_screener_indicators(report: str) -> tuple[str, str, str]:
+    """Parse 'RSI=X, VolOsc=Y%, DistSMA50=Z%' from screener report."""
+    import re
+
+    rsi = vol = sma = "—"
+    if m := re.search(r"RSI=([-\d.]+)", report):
+        rsi = m.group(1)
+    if m := re.search(r"VolOsc=([+-]?[\d.]+)%", report):
+        vol = m.group(1)
+    if m := re.search(r"DistSMA50=([+-]?[\d.]+)%", report):
+        sma = m.group(1)
+    return rsi, vol, sma
+
+
 if __name__ == "__main__":
     app()
